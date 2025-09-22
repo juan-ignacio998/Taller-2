@@ -14,9 +14,7 @@ from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize
 
 
-# ==========================
 #  Diccionario de chat words
-# ==========================
 chat_words = {
     "q": "que",
     "xq": "porque",
@@ -30,9 +28,9 @@ chat_words = {
 stop_words = set(stopwords.words("spanish"))
 
 
-# ==========================
+
 #  Función de preprocesamiento
-# ==========================
+
 def preprocess_text(text):
     text = text.lower()
     text = re.sub(r"http\S+|www.\S+", "", text)
@@ -48,9 +46,9 @@ def preprocess_text(text):
     return tokens
 
 
-# ==========================
+
 #  Web Scraping de Trustpilot
-# ==========================
+
 def get_reviews(url, pages=1):
     headers = {
         "User-Agent": (
@@ -82,9 +80,9 @@ def get_reviews(url, pages=1):
     return all_reviews
 
 
-# ==========================
+
 #  Guardar en CSV
-# ==========================
+
 def save_to_csv(data, filename="dataset.csv"):
     with open(filename, mode="w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -95,9 +93,9 @@ def save_to_csv(data, filename="dataset.csv"):
     print(f"✅ CSV guardado en {filename} con {len(data)} reseñas.")
 
 
-# ==========================
+
 #  MAIN
-# ==========================
+
 if __name__ == "__main__":
     url = "https://es.trustpilot.com/review/tradeinn.com"
     reseñas = get_reviews(url, pages=30)  # Cambiá la cantidad de páginas
