@@ -3,15 +3,20 @@
 import re
 import time
 import csv
-import emoji
-import requests
-import pandas as pd
-import matplotlib.pyplot as plt
-from bs4 import BeautifulSoup
+import importlib.util
 from collections import Counter
-from wordcloud import WordCloud
-from nltk.corpus import stopwords
-from nltk.tokenize import word_tokenize
+if importlib.util.find_spec("nltk") is not None:
+    from nltk.corpus import stopwords
+    from nltk.tokenize import word_tokenize
+else:
+    stopwords = None
+    word_tokenize = None
+
+
+if importlib.util.find_spec("emoji") is not None:
+    import emoji  # type: ignore
+else:
+    emoji = None
 
 
 #  Diccionario de chat words
@@ -25,7 +30,44 @@ chat_words = {
 }
 
 # Stopwords en español
-stop_words = set(stopwords.words("spanish"))
+
+
+def load_spanish_stopwords():
+    """Carga las stopwords en español con un conjunto mínimo de respaldo."""
+
+    if stopwords is None:
+        return {
+            "de",
+            "la",
+            "que",
+            "el",
+            "en",
+            "y",
+            "a",
+            "los",
+            "del",
+            "se",
+        }
+
+    try:
+        return set(stopwords.words("spanish"))
+    except LookupError:
+        # Conjunto mínimo para escenarios sin corpus descargado.
+        return {
+            "de",
+            "la",
+            "que",
+            "el",
+            "en",
+            "y",
+            "a",
+            "los",
+            "del",
+            "se",
+        }
+
+
+stop_words = load_spanish_stopwords()
 
 
 
@@ -34,14 +76,21 @@ stop_words = set(stopwords.words("spanish"))
 def preprocess_text(text):
     text = text.lower()
     text = re.sub(r"http\S+|www.\S+", "", text)
-    text = emoji.demojize(text, delimiters=(" ", " "))
+    if emoji is not None:
+        text = emoji.demojize(text, delimiters=(" ", " "))
     for word, full in chat_words.items():
         text = re.sub(r"\b" + word + r"\b", full, text)
     text = re.sub(r"\d+", "", text)
     text = re.sub(r"([!?.,]){2,}", r"\1", text)
     text = re.sub(r"[^a-záéíóúüñ ]", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
-    tokens = word_tokenize(text, language="spanish")
+    if word_tokenize is None:
+        tokens = text.split()
+    else:
+        try:
+            tokens = word_tokenize(text, language="spanish")
+        except LookupError:
+            tokens = text.split()
     tokens = [w for w in tokens if w not in stop_words]
     return tokens
 
@@ -50,6 +99,9 @@ def preprocess_text(text):
 #  Web Scraping de Trustpilot
 
 def get_reviews(url, pages=1):
+    import requests
+    from bs4 import BeautifulSoup
+
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -94,21 +146,69 @@ def save_to_csv(data, filename="dataset.csv"):
 
 
 
+#  Análisis de sentimientos
+
+_sentiment_analyzer = None
+
+
+def get_sentiment_analyzer():
+    """Carga perezosamente un modelo de análisis de sentimientos en español."""
+
+    global _sentiment_analyzer
+
+    if _sentiment_analyzer is None:
+        from transformers import pipeline
+
+        _sentiment_analyzer = pipeline(
+            "sentiment-analysis", model="finiteautomata/beto-sentiment-analysis"
+        )
+
+    return _sentiment_analyzer
+
+
+def analyze_sentiment(reviews, analyzer=None):
+    """Devuelve etiquetas y puntajes de sentimiento para una lista de reseñas."""
+
+    if analyzer is None:
+        analyzer = get_sentiment_analyzer()
+    results = analyzer(reviews, truncation=True)
+    labels = [result["label"].lower() for result in results]
+    scores = [result["score"] for result in results]
+
+    return labels, scores
+
+
 #  MAIN
 
 if __name__ == "__main__":
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    from wordcloud import WordCloud
+
     url = "https://es.trustpilot.com/review/tradeinn.com"
+    dataset_path = "dataset.csv"
+
     reseñas = get_reviews(url, pages=30)  # Cambiá la cantidad de páginas
 
-    save_to_csv(reseñas, r"C:\Users\juani\Documents\dataset.csv")
+    save_to_csv(reseñas, dataset_path)
 
     # Leer dataset
-    df = pd.read_csv(r"C:\Users\juani\Documents\dataset.csv")
+    df = pd.read_csv(dataset_path)
+
+    # Análisis de sentimientos
+    sentimientos, puntajes = analyze_sentiment(df["review_original"].tolist())
+    df["sentimiento"] = sentimientos
+    df["puntaje_sentimiento"] = puntajes
+    df.to_csv(dataset_path, index=False)
 
     # Contar frecuencias
     all_tokens = " ".join(df["review_procesado"]).split()
     word_freq = Counter(all_tokens)
     print(word_freq.most_common(10))
+
+    # Distribución de sentimientos
+    print("Distribución de sentimientos:")
+    print(Counter(sentimientos))
 
     # Nube de palabras
     wordcloud = WordCloud(
