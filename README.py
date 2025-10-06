@@ -1,223 +1,189 @@
-# Taller-2
-# -*- coding: utf-8 -*-
+import os
 import re
 import time
-import csv
-import importlib.util
+import emoji
+import nltk
+import requests
+import pandas as pd
+import matplotlib.pyplot as plt
+from bs4 import BeautifulSoup
 from collections import Counter
-if importlib.util.find_spec("nltk") is not None:
-    from nltk.corpus import stopwords
-    from nltk.tokenize import word_tokenize
-else:
-    stopwords = None
-    word_tokenize = None
+from nltk.corpus import stopwords
+from nltk.tokenize import word_tokenize
+from sklearn.model_selection import train_test_split
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.naive_bayes import MultinomialNB
+from sklearn.linear_model import LogisticRegression
+from sklearn.svm import LinearSVC
+from sklearn.metrics import classification_report, f1_score
+from wordcloud import WordCloud
 
+URL = "https://es.trustpilot.com/review/tradeinn.com"
+PAGINAS = 200        # paginas a scrapear
+DELAY = 2.0         # segundos entre solicitudes
+ARCHIVO_SALIDA = "dataset_labeled.csv"
+OMITIR_SCRAPEO = False 
 
-if importlib.util.find_spec("emoji") is not None:
-    import emoji  # type: ignore
-else:
-    emoji = None
+# Pesos de clase 
+PESOS_CLASE = {"neg": 1.0, "neu": 6.0, "pos": 1.0} 
+ZERO_DIV = 0  # evita warnings si alguna clase no recibe predicciones
 
-
-#  Diccionario de chat words
-chat_words = {
-    "q": "que",
-    "xq": "porque",
-    "k": "que",
-    "tmb": "también",
-    "d": "de",
-    "m": "me",
-}
-
-# Stopwords en español
-
-
-def load_spanish_stopwords():
-    """Carga las stopwords en español con un conjunto mínimo de respaldo."""
-
-    if stopwords is None:
-        return {
-            "de",
-            "la",
-            "que",
-            "el",
-            "en",
-            "y",
-            "a",
-            "los",
-            "del",
-            "se",
-        }
-
+# recursos de NLTK
+for pkg in ["stopwords", "punkt"]:
     try:
-        return set(stopwords.words("spanish"))
+        nltk.data.find(pkg)
     except LookupError:
-        # Conjunto mínimo para escenarios sin corpus descargado.
-        return {
-            "de",
-            "la",
-            "que",
-            "el",
-            "en",
-            "y",
-            "a",
-            "los",
-            "del",
-            "se",
-        }
+        nltk.download(pkg)
 
+STOP_WORDS = set(stopwords.words("spanish"))
 
-stop_words = load_spanish_stopwords()
+CHAT_WORDS = {"q": "que", "xq": "porque", "k": "que", "tmb": "también", "d": "de", "m": "me"}
 
+# Preprocesamiento de texto
 
+def limpiar_texto(texto: str) -> str:
+    texto = (texto or "").lower()
+    texto = re.sub(r"http\S+|www\.\S+", " ", texto)
+    texto = emoji.demojize(texto, delimiters=(" ", " "))
+    for corto, completo in CHAT_WORDS.items():
+        texto = re.sub(rf"\b{re.escape(corto)}\b", completo, texto)
+    texto = re.sub(r"\d+", " ", texto)
+    texto = re.sub(r"([!?.,]){2,}", r"\1", texto)
+    texto = re.sub(r"[^a-záéíóúüñ ]", " ", texto)
+    texto = re.sub(r"\s+", " ", texto).strip()
+    tokens = word_tokenize(texto, language="spanish")
+    tokens = [t for t in tokens if t not in STOP_WORDS]
+    return " ".join(tokens)
 
-#  Función de preprocesamiento
+# Scraping de trustpilot
 
-def preprocess_text(text):
-    text = text.lower()
-    text = re.sub(r"http\S+|www.\S+", "", text)
-    if emoji is not None:
-        text = emoji.demojize(text, delimiters=(" ", " "))
-    for word, full in chat_words.items():
-        text = re.sub(r"\b" + word + r"\b", full, text)
-    text = re.sub(r"\d+", "", text)
-    text = re.sub(r"([!?.,]){2,}", r"\1", text)
-    text = re.sub(r"[^a-záéíóúüñ ]", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    if word_tokenize is None:
-        tokens = text.split()
-    else:
-        try:
-            tokens = word_tokenize(text, language="spanish")
-        except LookupError:
-            tokens = text.split()
-    tokens = [w for w in tokens if w not in stop_words]
-    return tokens
+CABECERAS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36"}
 
+def obtener_rating_desde_alt(alt_text):
+    if not alt_text:
+        return None
+    alt_text = alt_text.lower()
+    if "estrella" not in alt_text and "star" not in alt_text:
+        return None
+    m = re.search(r"(\d)\s*(?:de|out of)?\s*5", alt_text)
+    return int(m.group(1)) if m else None
 
+def extraer_reseñas(soup: BeautifulSoup):
+    reseñas = []
+    bloques = soup.find_all("section") or soup.find_all("article")
+    if not bloques:
+        bloques = soup.find_all("p", {"data-service-review-text-typography": "true"})
+    for b in bloques:
+        p = b.find("p", {"data-service-review-text-typography": "true"}) or b.find("p")
+        texto = p.get_text(strip=True) if p else None
+        rating = None
+        tag = b.find(attrs={"data-service-review-rating": True})
+        if tag and tag.get("data-service-review-rating"):
+            try:
+                rating = int(tag["data-service-review-rating"])
+            except:
+                rating = None
+        if rating is None:
+            img = b.find("img", alt=True)
+            if img:
+                rating = obtener_rating_desde_alt(img.get("alt"))
+        if texto and rating:
+            reseñas.append((texto, rating))
+    return reseñas
 
-#  Web Scraping de Trustpilot
-
-def get_reviews(url, pages=1):
-    import requests
-    from bs4 import BeautifulSoup
-
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/90.0.4430.93 Safari/537.36"
-        )
-    }
-
-    all_reviews = []
-
-    for page in range(1, pages + 1):
-        print(f"Scrapeando página {page}...")
-        paged_url = f"{url}?page={page}"
-        response = requests.get(paged_url, headers=headers)
-
-        if response.status_code != 200:
-            print(f"Error {response.status_code} en {paged_url}")
+def obtener_reseñas(url: str, paginas: int = 1, delay: float = 2.0):
+    filas = []
+    for pagina in range(1, paginas + 1):
+        print(f"Scrapeando página {pagina} de {paginas}")
+        resp = requests.get(f"{url}?page={pagina}", headers=CABECERAS, timeout=25)
+        if resp.status_code != 200:
+            print(f"Error {resp.status_code} en la página {pagina}")
+            time.sleep(delay)
             continue
+        soup = BeautifulSoup(resp.text, "html.parser")
+        pares = extraer_reseñas(soup)
+        for texto, rating in pares:
+            filas.append({
+                "review_original": texto,
+                "review_clean": limpiar_texto(texto),
+                "Rating": rating
+            })
+        time.sleep(delay)
+    return pd.DataFrame(filas)
 
-        soup = BeautifulSoup(response.text, "html.parser")
-        reviews = soup.find_all("p", {"data-service-review-text-typography": "true"})
+# Etiquetado (1–5 neg/neu/pos)
 
-        for r in reviews:
-            all_reviews.append(r.get_text().strip())
+def etiquetar_sentimiento(r):
+    if r <= 2:
+        return "neg"
+    elif r == 3:
+        return "neu"
+    else:
+        return "pos"
 
-        time.sleep(2)  # respetar servidor
+# Entrenamiento y evaluación
 
-    return all_reviews
+def entrenar_y_evaluar(modelo, X_train, y_train, X_test, y_test, nombre):
+    modelo.fit(X_train, y_train)
+    y_pred = modelo.predict(X_test)
+    print(f"{nombre}")
+    print(classification_report(y_test, y_pred, digits=3, zero_division=ZERO_DIV))
+    return f1_score(y_test, y_pred, average="macro")
 
-
-
-#  Guardar en CSV
-
-def save_to_csv(data, filename="dataset.csv"):
-    with open(filename, mode="w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(["review_original", "review_procesado"])
-        for review in data:
-            tokens = preprocess_text(review)
-            writer.writerow([review, " ".join(tokens)])
-    print(f"✅ CSV guardado en {filename} con {len(data)} reseñas.")
-
-
-
-#  Análisis de sentimientos
-
-_sentiment_analyzer = None
-
-
-def get_sentiment_analyzer():
-    """Carga perezosamente un modelo de análisis de sentimientos en español."""
-
-    global _sentiment_analyzer
-
-    if _sentiment_analyzer is None:
-        from transformers import pipeline
-
-        _sentiment_analyzer = pipeline(
-            "sentiment-analysis", model="finiteautomata/beto-sentiment-analysis"
-        )
-
-    return _sentiment_analyzer
-
-
-def analyze_sentiment(reviews, analyzer=None):
-    """Devuelve etiquetas y puntajes de sentimiento para una lista de reseñas."""
-
-    if analyzer is None:
-        analyzer = get_sentiment_analyzer()
-    results = analyzer(reviews, truncation=True)
-    labels = [result["label"].lower() for result in results]
-    scores = [result["score"] for result in results]
-
-    return labels, scores
-
-
-#  MAIN
+# Main
 
 if __name__ == "__main__":
-    import pandas as pd
-    import matplotlib.pyplot as plt
-    from wordcloud import WordCloud
+    if OMITIR_SCRAPEO and os.path.exists(ARCHIVO_SALIDA):
+        df = pd.read_csv(ARCHIVO_SALIDA)
+    else:
+        df = obtener_reseñas(URL, paginas=PAGINAS, delay=DELAY)
+        df = df.dropna(subset=["review_clean", "Rating"]).drop_duplicates(subset=["review_original"])
+        df["Sentiment"] = df["Rating"].apply(etiquetar_sentimiento)
+        df.to_csv(ARCHIVO_SALIDA, index=False, encoding="utf-8")
 
-    url = "https://es.trustpilot.com/review/tradeinn.com"
-    dataset_path = "dataset.csv"
+    print("\nDistribución de Rating (1–5):")
+    print(df["Rating"].value_counts().sort_index())
+    print("\nDistribución de Sentiment (neg/neu/pos):")
+    print(df["Sentiment"].value_counts())
 
-    reseñas = get_reviews(url, pages=30)  # Cambiá la cantidad de páginas
-
-    save_to_csv(reseñas, dataset_path)
-
-    # Leer dataset
-    df = pd.read_csv(dataset_path)
-
-    # Análisis de sentimientos
-    sentimientos, puntajes = analyze_sentiment(df["review_original"].tolist())
-    df["sentimiento"] = sentimientos
-    df["puntaje_sentimiento"] = puntajes
-    df.to_csv(dataset_path, index=False)
-
-    # Contar frecuencias
-    all_tokens = " ".join(df["review_procesado"]).split()
-    word_freq = Counter(all_tokens)
-    print(word_freq.most_common(10))
-
-    # Distribución de sentimientos
-    print("Distribución de sentimientos:")
-    print(Counter(sentimientos))
-
-    # Nube de palabras
-    wordcloud = WordCloud(
-        width=800,
-        height=400,
-        background_color="white"
-    ).generate(" ".join(all_tokens))
-
-    plt.figure(figsize=(10, 5))
-    plt.imshow(wordcloud, interpolation="bilinear")
+    # nube de palabras
+    tokens = " ".join(df["review_clean"].astype(str))
+    wc = WordCloud(width=1000, height=500, background_color="white").generate(tokens)
+    plt.imshow(wc, interpolation="bilinear")
     plt.axis("off")
+    plt.title("Nube de palabras — corpus limpio")
     plt.show()
+
+    # Division de datos
+    X_train, X_test, y_train, y_test = train_test_split(
+        df["review_clean"].astype(str), df["Sentiment"].astype(str),
+        test_size=0.2, random_state=42, stratify=df["Sentiment"]
+    )
+
+    # Vectorización TF-IDF
+    tfidf = TfidfVectorizer(max_features=20000, ngram_range=(1, 2), min_df=2, max_df=0.95)
+    X_train_tfidf = tfidf.fit_transform(X_train)
+    X_test_tfidf = tfidf.transform(X_test)
+
+    # Baseline
+    clase_mayoritaria = Counter(y_train).most_common(1)[0][0]
+    y_pred_base = [clase_mayoritaria] * len(y_test)
+    print("\n Baseline (clase mayoritaria)")
+    print(classification_report(y_test, y_pred_base, digits=3, zero_division=ZERO_DIV))
+
+    # Modelos
+    resultados = []
+    modelos = [
+        ("Naïve Bayes (TF-IDF)", MultinomialNB(alpha=0.5)),
+        ("Regresión Logística (TF-IDF)", LogisticRegression(max_iter=2000, class_weight=PESOS_CLASE, solver="lbfgs", C=1.0)),
+        ("SVM Lineal (TF-IDF)", LinearSVC(class_weight=PESOS_CLASE, C=1.0))
+    ]
+
+    for nombre, modelo in modelos:
+        f1 = entrenar_y_evaluar(modelo, X_train_tfidf, y_train, X_test_tfidf, y_test, nombre)
+        resultados.append((nombre, f1))
+
+    print("\n Comparación de modelos (Macro-F1)")
+    print(pd.DataFrame(resultados, columns=["Modelo", "Macro-F1"]).sort_values("Macro-F1", ascending=False))
+   
+
